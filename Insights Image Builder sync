@@ -1,0 +1,58 @@
+#!/bin/bash
+#organization=Conversion
+## Pass variables as ENV vars
+## organization
+## product
+## ipaddress
+## console credentials
+
+export organization="home"
+export product="ImageBuilderaaS"
+#export CURLAUTH='rhte2023:!QAZ2wsx#EDC4rfv!@#'
+#export CURLAUTH='<%= input("user") -%>:<%= input("authtoken") -%>'
+export client_id='<%= input("client_id") -%>'
+export client_secret='<%= input("client_secret") -%>'
+## export compute_resource='<%= input("compute_resource") -%>'
+
+export TOKEN=`curl -s -d "$client_id" -d "$client_secret" -d "grant_type=client_credentials" "https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token" -d "scope=api.console" | jq -r '.access_token'`
+
+
+##Get list of the Images
+imagelist=`curl -ssk "https://console.redhat.com/api/image-builder/v1/composes" -H "Authorization: Bearer $TOKEN" | jq | grep -ie "created_at" -A1 | grep -i "id" | cut -d '"' -f4`
+##Get gues image list
+guestimagelist=`curl -ssk "https://console.redhat.com/api/image-builder/v1/composes" -H "Authorization: Bearer $TOKEN" | jq | grep -ie "created_at" -A1 -ie "\"image_type\": \"guest-image\"" | grep -ie "\"image_type\": \"guest-image\"" -B2 | grep -iv "\-\-" | grep -v image_type | cut -d '"' -f 4`
+
+
+##Let's work with the guest images
+# Cycle through the GUEST images
+
+for image in $guestimagelist; do
+        echo "Found image ID:" $image
+        echo "Getting download URL"
+        guestdownloadurl=`curl -ssk "https://console.redhat.com/api/image-builder/v1/composes/$image" -H "Authorization: Bearer $TOKEN" | jq | grep -i "\"url\": \"" | cut -d '"' -f 4`
+        ### Optimize !!!
+        guestdownloadfilename=`curl -ssk "https://console.redhat.com/api/image-builder/v1/composes/$image" -H "Authorization: Bearer $TOKEN" | jq | grep -i "\"url\": \"" | cut -d '"' -f 4 | cut -d '/' -f 4 | cut -d '?' -f 1`
+        guestimagename=`curl -ssk "https://console.redhat.com/api/image-builder/v1/composes/$image" -H "Authorization: Bearer $TOKEN" | jq | grep -i image_name | cut -d '"' -f 4`
+        echo "Downloading image ..."
+        wget -q -nc -S -O ~/$guestdownloadfilename "$guestdownloadurl"
+        ### Add error handling and display errors if file exists or can't be downloaded
+        ### Later make sure the file is 0-ed with a proper message so it does not take space and it doesn't get downloaded
+        ### for example: rm -rf $ovadownloadfilename; touch $ovadownloadfilename
+
+        if [ -s ~/$guestdownloadfilename ]; then
+                # The file is not-empty.
+                ### 1. Create repository if it doesn't exist. Repository name is the name of the image. Organization could be picked up as a default org
+                hammer repository create --content-type "file" --name "guest_$guestimagename" --organization "$organization" --product "$product"
+                ### 2. Having the repository name get its ID as it is needed for the upload
+                guestrepoid=`hammer repository list --name guest_$guestimagename | grep -i guest_$guestimagename | cut -d '|' -f 1`
+                ### 3. Upload the file
+		cp ~/$guestdownloadfilename /tmp
+                hammer repository upload-content --id $guestrepoid --organization "$organization" --path /tmp/$guestdownloadfilename
+		rm -rf /tmp/$guestdownloadfilename
+
+        else
+                echo "The image cannot be downloaded. It has likely expired."
+        fi
+	rm -rf ~/$guestdownloadfilename; touch ~/$guestdownloadfilename
+
+done
